@@ -1,0 +1,71 @@
+pub const Q_CREATE_YAP: &'static str = "CREATE DATABASE IF NOT EXISTS yap;";
+
+pub const Q_USE_YAP: &'static str = "USE yap;";
+
+/* pubkey rsa-2048 256 bytes
+hashed_pass PBKDF2 16 bytes
+friends json
+groups json
+status json
+visibility json
+*/
+pub const Q_CREATE_TABLE_USERS: &'static str = "
+CREATE TABLE IF NOT EXISTS u (
+    uid INT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
+    email VARCHAR(50) UNIQUE NOT NULL,
+    pubkey VARCHAR(512) NOT NULL,
+    hashed_pass VARCHAR(256) NOT NULL,
+    alias VARCHAR(40),
+    friends BLOB NOT NULL,
+    groups BLOB NOT NULL,
+    motd VARCHAR(500),
+    status BLOB NOT NULL,
+    visibility BLOB NOT NULL,
+    INDEX emails (email)
+);";
+
+// msg_content json
+pub const Q_CREATE_TABLE_USER_MESSAGES: &'static str = "
+CREATE TABLE IF NOT EXISTS u_message (
+    umid BIGINT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
+    sender_id INT UNSIGNED NOT NULL,
+    receiver_id INT UNSIGNED NOT NULL,
+    msg_content BLOB NOT NULL,
+    time_posted DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    r BOOLEAN NOT NULL,
+    FOREIGN KEY (sender_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (receiver_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
+);";
+
+pub const Q_CREATE_TABLE_GROUPS: &'static str = "
+CREATE TABLE IF NOT EXISTS g (
+    gid INT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
+    motd VARCHAR(500)
+);";
+
+pub const Q_CREATE_TABLE_GROUP_USERS: &'static str = "
+CREATE TABLE IF NOT EXISTS g_member (
+    uid INT UNSIGNED NOT NULL,
+    gid INT UNSIGNED NOT NULL,
+    FOREIGN KEY (uid) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (gid) REFERENCES g(gid) ON DELETE CASCADE ON UPDATE CASCADE
+);";
+
+pub const Q_CREATE_TABLE_GROUP_MESSAGES: &'static str = "
+CREATE TABLE IF NOT EXISTS g_message (
+    gmid BIGINT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
+    sender_id INT UNSIGNED NOT NULL,
+    gid INT UNSIGNED NOT NULL,
+    FOREIGN KEY (sender_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (gid) REFERENCES g(gid) ON DELETE CASCADE ON UPDATE CASCADE,
+    msg_content BLOB NOT NULL,
+    time_posted DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);";
+
+pub const Q_CREATE_TABLE_USER_READ_GROUP: &'static str = "
+CREATE TABLE IF NOT EXISTS u_read (
+    gmid BIGINT UNSIGNED UNIQUE NOT NULL,
+    reader_id INT UNSIGNED NOT NULL,
+    FOREIGN KEY (gmid) REFERENCES g_message(gmid) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (reader_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
+);";
