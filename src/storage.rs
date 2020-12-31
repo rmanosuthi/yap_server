@@ -44,18 +44,19 @@ impl Storage {
             Err(RegisterError::UserAlreadyExists)
         } else {
             // new user
-            tx.query_drop(format!(
-                "INSERT into u
-                    (email, pubkey, hashed_pass, friends, groups, status, visibility) VALUES
-                    ('{}', '{}', '{}', '[]', '[]', '{}', '{}');
-                    ",
-                req.email,
-                req.pubkey,
-                req.password_hash,
-                serde_json::to_string(&UserStatus::default()).unwrap(),
-                serde_json::to_string(&UserVisibility::default()).unwrap()
-            ))
-            .map_err(RegisterError::DbError)?;
+            let stmt_new_user = tx.prep("INSERT into u
+            (email, pubkey, hashed_pass, friends, groups, status, visibility) VALUES
+            (:email, :pubkey, :hashed_pass, :friends, :groups, :status, :visibility);
+            ").map_err(RegisterError::DbError)?;
+            tx.exec_drop(stmt_new_user, params! {
+                "email" => req.email,
+                "pubkey" => req.pubkey,
+                "hashed_pass" => req.password_hash,
+                "friends" => serde_json::to_string::<[UserId]>(&[]).unwrap(),
+                "groups" => serde_json::to_string::<[UserId]>(&[]).unwrap(),
+                "status" => serde_json::to_string(&UserStatus::default()).unwrap(),
+                "visibility" => serde_json::to_string(&UserVisibility::default()).unwrap()
+            }).map_err(RegisterError::DbError)?;
             if let Some(cid) = tx.last_insert_id() {
                 tx.commit().map_err(RegisterError::DbError)?;
                 Ok((cid as u32).into())
@@ -81,7 +82,7 @@ impl Storage {
             Some((ref_uid, ref_pass)) => {
                 debug!("storage: login uid pass found");
                 if ref_pass == req.password_hash {
-                    tx.commit();
+                    tx.commit().map_err(LoginError::DbError)?;
                     Ok(UserId::from(ref_uid))
                 } else {
                     Err(LoginError::InvalidPassword)
@@ -100,23 +101,20 @@ impl Storage {
         msg: ClientMessage,
     ) -> Option<UserMessageId> {
         let mut tx = self.c.start_transaction(self.tx_opts).ok()?;
-        match tx.query_drop(format!(
-            "INSERT INTO u_message (sender_id, receiver_id, msg_content, r)
-            VALUES ({}, {}, '{}', 0);",
-            sender.to_string(),
-            receiver.to_string(),
-            msg.to_string()
-        )) {
-            Ok(_) => {
-                match tx.last_insert_id().map(UserMessageId::from) {
-                    Some(res) => {
-                        tx.commit().ok()?;
-                        Some(res)
-                    },
-                    None => None
-                }
+        let stmt_new_message_u = tx.prep("INSERT INTO u_message (sender_id, receiver_id, msg_content, r)
+        VALUES (:sender_id, :receiver_id, :msg_content, :r);").ok()?;
+        tx.exec_drop(stmt_new_message_u, params! {
+            "sender_id" => sender.to_string(),
+            "receiver_id" => receiver.to_string(),
+            "msg_content" => msg.to_string(),
+            "r" => false
+        }).ok()?;
+        match tx.last_insert_id().map(UserMessageId::from) {
+            Some(res) => {
+                tx.commit().ok()?;
+                Some(res)
             },
-            Err(e) => None,
+            None => None
         }
     }
     pub fn new_message_g(
@@ -126,23 +124,19 @@ impl Storage {
         msg: ClientMessage,
     ) -> Option<GroupMessageId> {
         let mut tx = self.c.start_transaction(self.tx_opts).ok()?;
-        match tx.query_drop(format!(
-            "INSERT INTO g_message (sender_id, gid, msg_content)
-            VALUES ({}, {}, '{}', 0);",
-            sender.to_string(),
-            group.to_string(),
-            msg.to_string()
-        )) {
-            Ok(_) => {
-                match tx.last_insert_id().map(GroupMessageId::from) {
-                    Some(res) => {
-                        tx.commit().ok()?;
-                        Some(res)
-                    },
-                    None => None
-                }
+        let stmt_new_message_g = tx.prep("INSERT INTO g_message (sender_id, gid, msg_content)
+        VALUES (:sender_id, :gid, :msg_content);").ok()?;
+        tx.exec_drop(stmt_new_message_g, params! {
+            "sender_id" => sender.to_string(),
+            "gid" => group.to_string(),
+            "msg_content" => msg.to_string()
+        }).ok()?;
+        match tx.last_insert_id().map(GroupMessageId::from) {
+            Some(res) => {
+                tx.commit().ok()?;
+                Some(res)
             },
-            Err(e) => None,
+            None => None
         }
     }
     pub fn get_user_data(&mut self, u: UserId) -> Option<UserRecord> {
