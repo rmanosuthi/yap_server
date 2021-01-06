@@ -45,47 +45,80 @@ mod msg {
     #[derive(Debug)]
     pub enum CoreToWs {
         SendDirect {
-            src: UserId,
             dest: UserId,
-            msg: WsClientbound,
+            tx: WsClientboundTx,
         },
         SendMultiple {
-            src: UserId,
             dest: Vec<UserId>,
-            msg: WsClientbound,
+            tx: WsClientboundTx,
         },
     }
 
+    impl CoreToWs {
+        pub fn from_tx_u(dest: UserId, tx: WsClientboundTx) -> Self {
+            Self::SendDirect {dest, tx}
+        }
+        pub fn from_tx_us(dest: Vec<UserId>, tx: WsClientboundTx) -> Self {
+            Self::SendMultiple {dest, tx}
+        }
+    }
     #[derive(Debug)]
-    pub struct WsToCore {
-        pub sender: UserId,
-        pub inner: IncomingCoreMsg,
+    pub enum WsToCore {
+        Tx(WsServerboundTx)
     }
 
-    impl WsToCore {
-        pub fn new(sender: UserId, inner: IncomingCoreMsg) -> WsToCore {
-            WsToCore { sender, inner }
+    impl From<WsServerboundTx> for WsToCore {
+        fn from(tx: WsServerboundTx) -> Self {
+            Self::Tx(tx)
         }
     }
 
     #[derive(Debug)]
-    pub enum IncomingCoreMsg {
-        String(String),
-        Binary(Vec<u8>),
-        FlagRead(UserMessageId)
+    pub struct WsServerboundTx {
+        sender: UserId,
+        inner: WsServerboundPayload
+    }
+
+    impl WsServerboundTx {
+        /// Convert a raw ws message to a transmission.
+        ///
+        /// Deserialization should be done at entry point for performance reasons.
+        pub fn new(sender: UserId, payload: tungstenite::Message) -> Option<WsServerboundTx> {
+            match payload {
+                tungstenite::Message::Text(s) => {
+                    serde_json::from_str(&s).ok().map(|deserialized| 
+                        WsServerboundTx {
+                            sender,
+                            inner: deserialized
+                        })
+                },
+                _ => None
+            }
+        }
+        pub fn extract(self) -> (UserId, WsServerboundPayload) {
+            (self.sender, self.inner)
+        }
     }
 
     #[derive(Debug)]
     pub enum WorkerToWs {
-        ForwardToCoreString(ConnectionId, String),
-        ForwardToCoreVec(ConnectionId, Vec<u8>),
+        /// ws will intercept this, transform into `WsServerboundTx`, then forward to core.
+        ForwardToCore(ConnectionId, tungstenite::Message),
+        /// ws will remove the mapping to uid.
         Disconnected(ConnectionId),
+        /// (unused) ws will let core know the umid has been sent successfully.
         ConfirmTransmittedUserMsg(ConnectionId, UserMessageId)
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum WsToWorker {
-        Payload(WsClientbound),
+        Tx(WsClientboundTx),
         Disconnect,
+    }
+
+    impl From<WsClientboundTx> for WsToWorker {
+        fn from(tx: WsClientboundTx) -> Self {
+            Self::Tx(tx)
+        }
     }
 }

@@ -2,8 +2,8 @@ pub const Q_CREATE_YAP: &'static str = "CREATE DATABASE IF NOT EXISTS yap;";
 
 pub const Q_USE_YAP: &'static str = "USE yap;";
 
-/* pubkey rsa-2048 256 bytes
-hashed_pass PBKDF2 16 bytes
+/* pubkey SHOULD BE rsa-2048 256 bytes but not enforced
+hashed_pass SHOULD BE PBKDF2 16 bytes but not enforced
 friends json
 groups json
 status json
@@ -13,8 +13,8 @@ pub const Q_CREATE_TABLE_USERS: &'static str = "
 CREATE TABLE IF NOT EXISTS u (
     uid INT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
     email VARCHAR(50) UNIQUE NOT NULL,
-    pubkey VARCHAR(512) NOT NULL,
-    hashed_pass VARCHAR(256) NOT NULL,
+    pubkey VARCHAR(500) NOT NULL,
+    hashed_pass VARCHAR(200) NOT NULL,
     alias VARCHAR(40),
     friends BLOB NOT NULL,
     groups BLOB NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS u_message (
     sender_id INT UNSIGNED NOT NULL,
     receiver_id INT UNSIGNED NOT NULL,
     msg_content BLOB NOT NULL,
-    time_posted DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    time_posted DATETIME NOT NULL,
     r BOOLEAN NOT NULL,
     FOREIGN KEY (sender_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE,
     FOREIGN KEY (receiver_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
@@ -63,9 +63,17 @@ CREATE TABLE IF NOT EXISTS g_message (
 );";
 
 pub const Q_CREATE_TABLE_USER_READ_GROUP: &'static str = "
-CREATE TABLE IF NOT EXISTS u_read (
+CREATE TABLE IF NOT EXISTS g_message_read (
     gmid BIGINT UNSIGNED UNIQUE NOT NULL,
     reader_id INT UNSIGNED NOT NULL,
     FOREIGN KEY (gmid) REFERENCES g_message(gmid) ON DELETE CASCADE ON UPDATE CASCADE,
     FOREIGN KEY (reader_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
+);";
+
+pub const Q_CREATE_FRIENDS: &'static str = "
+CREATE TABLE IF NOT EXISTS u_friend (
+    l INT UNSIGNED NOT NULL,
+    r INT UNSIGNED NOT NULL,
+    FOREIGN KEY (l) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (r) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
 );";

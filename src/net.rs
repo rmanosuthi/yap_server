@@ -82,3 +82,13 @@ pub struct NetConfig {
     pub ws_addr: String,
     pub enable_register: bool,
 }
+
+impl From<&Config> for NetConfig {
+    fn from(c: &Config) -> Self {
+        NetConfig {
+            api_addr: c.api_addr.clone(),
+            ws_addr: c.ws_addr.clone(),
+            enable_register: true
+        }
+    }
+}

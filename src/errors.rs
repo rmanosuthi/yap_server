@@ -21,6 +21,16 @@ pub struct WebChannelsError;
 
 impl Reject for WebChannelsError {}
 
+#[derive(Debug)]
+pub struct WebCoreLookupFailed;
+
+impl Reject for WebCoreLookupFailed {}
+
+#[derive(Debug)]
+pub struct WebInvalidLoginToken;
+
+impl Reject for WebInvalidLoginToken {}
+
 pub enum NetInternalError {
     ListenerBind(Box<dyn Error>),
 }

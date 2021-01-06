@@ -3,17 +3,44 @@ use std::unimplemented;
 use crate::imports::*;
 use crate::symbols::*;
 
-pub struct Core {}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Config {
+    pub db_addr: String,
+    pub api_addr: String,
+    pub ws_addr: String
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CoreConfig {
-    pub mysql_addr: String,
-    pub mysql_port: u16,
-    pub mysql_user: String,
-    pub mysql_pass: String
+    pub db_addr: String
 }
 
+impl From<&Config> for CoreConfig {
+    fn from(c: &Config) -> Self {
+        CoreConfig {db_addr: c.db_addr.clone()}
+    }
+}
+
+pub struct Core {}
+
 impl Core {
+    /// Convenience function for asking core to process data.
+    pub async fn ask(ca: CoreAsker, req: CoreRequest) -> Option<CoreReply> {
+        let (s, r) = tokio::sync::oneshot::channel();
+        let mut ca = ca;
+        if let Ok(()) = ca.send((req, s)).await {
+            if let Ok(cid_maybe) = r.await {
+                debug!("coreask: reply received {:?}", &cid_maybe);
+                cid_maybe
+            } else {
+                debug!("coreask: no reply");
+                None
+            }
+        } else {
+            debug!("coreask: send failed");
+            None
+        }
+    }
     pub fn run(cc: CoreConfig, chans: CoreChannels) {
         let mut r_stop = chans.r_stop.clone();
         std::thread::spawn(move || {
@@ -32,6 +59,13 @@ impl Core {
             });
         });
     }
+    /**
+    Main loop for Core. Does the following:
+    - process inbound ws messages
+    - process inbound core requests
+
+    Has a shutdown receiver.
+    */
     pub async fn internal(cc: CoreConfig, chans: CoreChannels) {
         let mut run = true;
         let mut r_f_ws = chans.r_ws;
@@ -39,57 +73,33 @@ impl Core {
         let mut r_stop = chans.r_stop;
         let mut r_corereq = chans.r_corereq;
         let mut store = Storage::new(
-            &cc.mysql_addr,
-            &cc.mysql_port.to_string(),
-            &cc.mysql_user,
-            &cc.mysql_pass
-        ).unwrap();
+            &cc.db_addr
+        )
+        .unwrap();
         let mut first_stopped = false;
         info!("Core: started");
         while run {
             debug!("CORE LOOP");
             tokio::select! {
                 Some(m_ws) = r_f_ws.recv() => {
-                    let origin = m_ws.sender;
-                    match m_ws.inner {
-                        IncomingCoreMsg::String(stri) => {
-                            debug!("CORE STR {:?} {}", &origin, &stri);
-                            // parse as WsServerbound
-                            if let Ok(wsm) = serde_json::from_str::<WsServerbound>(&stri) {
-                                match wsm {
-                                    WsServerbound::NewUserMessage {to, c} => {
-                                        if let Some(umid) = store.new_message_u(origin.clone(), to.clone(), c.clone()) {
-                                            s_t_ws.send(CoreToWs::SendDirect {
-                                                src: origin.clone(),
-                                                dest: to,
-                                                msg: WsClientbound::NewUserMessage {
-                                                        from: origin,
-                                                        c,
-                                                        umid
-                                                    }
-                                                
-                                            }).await;
-                                        }
-                                    },
-                                    _ => unimplemented!()
-                                }
-                            } else {
-                                warn!("CORE INCOMING STR parse failed");
-                            }
-                        }
-                        IncomingCoreMsg::Binary(u8s) => {
-                            debug!("CORE BIN {:?} {:?}", &origin, &u8s);
-                        }
-                        IncomingCoreMsg::FlagRead(umid) => {
-                            match store.flag_read_u(umid.clone()) {
-                                Some(_) => {
-                                    debug!("CORE flagged umid {} as read", &umid);
+                    match m_ws {
+                        WsToCore::Tx(r_tx) => {
+                            let (uid, r_tx) = r_tx.extract();
+                            match r_tx {
+                                WsServerboundPayload::NewUserMessage {to, content: c} => {
+                                    if let Some(p_msg) = store.new_message_u(uid.clone(), to.clone(), c.clone()) {
+                                        let send = Some(p_msg) // necessary to use map
+                                            .map(WsClientboundPayload::from)
+                                            .map(WsClientboundTx::from)
+                                            .map(move |tx| CoreToWs::from_tx_u(to, tx))
+                                            .unwrap();
+                                        s_t_ws.send(send).await;
+                                    }
                                 },
-                                None => {
-                                    warn!("CORE failed to flag umid {} as read", &umid);
-                                }
+                                _ => unimplemented!()
                             }
-                        }
+                        },
+                        _ => unimplemented!()
                     }
                 }
                 Some(_) = r_stop.recv() => {
@@ -109,35 +119,38 @@ impl Core {
             }
         }
     }
+    /**
+    Logic for handling core requests.
+    */
     async fn handle_corereqs(creq: CoreRequest, store: &mut Storage) -> Option<CoreReply> {
         debug!("handling corereq {:?}", &creq);
         match creq {
-            /*CoreRequest::GetClientId(lr) => store
-                .try_login(&lr.email, &lr.password_hash)
-                .await
-                .map(|res| CoreReply::ClientId(res)),
-            CoreRequest::Register(rr) => match store.register(rr).await {
-                Ok(cid) => Some(CoreReply::Register(cid)),
-                Err(_) => None,
-            },
-            CoreRequest::GetClientData(cid) => store
-                .get_client(&cid)
-                .await
-                .map(|res| CoreReply::GetClientData(res)),
-            CoreRequest::QueryMessage(q) => store
-                .query(&q)
-                .await
-                .map(|res| CoreReply::QueryMessage(res)),*/
-            CoreRequest::Login(req) => store.login(req).map(CoreReply::Login).ok(),
+            CoreRequest::Login(req) => store.try_login(req).map(CoreReply::Login).ok(),
             CoreRequest::Register(req) => store.try_register(req).map(CoreReply::Register).ok(),
-            CoreRequest::GetUserData(uid) => store.get_user_data(uid).map(CoreReply::GetUserData),
-            CoreRequest::GetGroupData(gid) => store.get_group_data(gid).map(CoreReply::GetGroupData),
-            CoreRequest::GetUserUserUnread { s, r } => store.get_user_user_unread(s, r).map(CoreReply::ClientBoundMessages),
-            CoreRequest::GetUserGroupUnread { s, g } => store.get_user_group_unread(s, g).map(CoreReply::ClientBoundMessages),
-            CoreRequest::NewUserMessage { u, d, c } => store.new_message_u(u, d, c).map(CoreReply::NewUserMessage),
-            CoreRequest::NewGroupMessage { u, g, c } => store.new_message_g(u, g, c).map(CoreReply::NewGroupMessage),
+            CoreRequest::GetUserData { lookup, asker } => store
+                .get_user_data(lookup, asker)
+                .map(CoreReply::GetUserData),
+            CoreRequest::GetGroupData(gid) => {
+                store.get_group_data(gid).map(CoreReply::GetGroupData)
+            }
+            CoreRequest::GetUserUserUnread { s, r } => store
+                .get_user_user_unread(s, r)
+                .map(WsClientboundPayload::from)
+                .map(WsClientboundTx::from)
+                .map(CoreReply::ClientboundTx),
+            CoreRequest::GetUserGroupUnread { s, g } => store
+                .get_user_group_unread(s, g)
+                .map(WsClientboundPayload::from)
+                .map(WsClientboundTx::from)
+                .map(CoreReply::ClientboundTx),
+            CoreRequest::NewUserMessage { u, d, c } => {
+                store.new_message_u(u, d, c).map(CoreReply::NewUserMessage)
+            }
+            CoreRequest::NewGroupMessage { u, g, c } => {
+                store.new_message_g(u, g, c).map(CoreReply::NewGroupMessage)
+            }
             CoreRequest::GetUserLast { s, r, amt } => unimplemented!(),
-            CoreRequest::GetGroupLast { s, g, amt } => unimplemented!()
+            CoreRequest::GetGroupLast { s, g, amt } => unimplemented!(),
         }
     }
 }
@@ -146,7 +159,10 @@ impl Core {
 pub enum CoreRequest {
     Login(LoginRequest),
     Register(RegisterRequest),
-    GetUserData(UserId),
+    GetUserData {
+        lookup: UserId,
+        asker: Option<UserId>,
+    },
     GetGroupData(GroupId),
     GetUserUserUnread {
         s: UserId,
@@ -182,9 +198,10 @@ pub enum CoreRequest {
 pub enum CoreReply {
     Login(UserId),
     Register(UserId),
-    GetUserData(UserRecord),
+    GetUserData(PublicUserRecord),
     GetGroupData(GroupRecord),
-    ClientBoundMessages(Vec<ServerMessage>),
-    NewUserMessage(UserMessageId),
+    ClientboundTx(WsClientboundTx),
+    ClientboundTxs(Vec<WsClientboundTx>),
+    NewUserMessage(PublicUserMessage),
     NewGroupMessage(GroupMessageId),
 }
