@@ -2,8 +2,8 @@ pub const Q_CREATE_YAP: &'static str = "CREATE DATABASE IF NOT EXISTS yap;";
 
 pub const Q_USE_YAP: &'static str = "USE yap;";
 
-/* pubkey SHOULD BE rsa-2048 256 bytes but not enforced
-hashed_pass SHOULD BE PBKDF2 16 bytes but not enforced
+/* pubkey SHOULD BE rsa-2048 hex(512) but not enforced
+hashed_pass SHOULD BE sha256 hex(64) but not enforced
 friends json
 groups json
 status json
@@ -13,8 +13,8 @@ pub const Q_CREATE_TABLE_USERS: &'static str = "
 CREATE TABLE IF NOT EXISTS u (
     uid INT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
     email VARCHAR(50) UNIQUE NOT NULL,
-    pubkey VARCHAR(500) NOT NULL,
-    hashed_pass VARCHAR(200) NOT NULL,
+    pubkey VARCHAR(512) NOT NULL,
+    hashed_pass VARCHAR(64) NOT NULL,
     alias VARCHAR(40),
     friends BLOB NOT NULL,
     groups BLOB NOT NULL,
