@@ -74,33 +74,6 @@ mod msg {
     }
 
     #[derive(Debug)]
-    pub struct WsServerboundTx {
-        sender: UserId,
-        inner: WsServerboundPayload
-    }
-
-    impl WsServerboundTx {
-        /// Convert a raw ws message to a transmission.
-        ///
-        /// Deserialization should be done at entry point for performance reasons.
-        pub fn new(sender: UserId, payload: tungstenite::Message) -> Option<WsServerboundTx> {
-            match payload {
-                tungstenite::Message::Text(s) => {
-                    serde_json::from_str(&s).ok().map(|deserialized| 
-                        WsServerboundTx {
-                            sender,
-                            inner: deserialized
-                        })
-                },
-                _ => None
-            }
-        }
-        pub fn extract(self) -> (UserId, WsServerboundPayload) {
-            (self.sender, self.inner)
-        }
-    }
-
-    #[derive(Debug)]
     pub enum WorkerToWs {
         /// ws will intercept this, transform into `WsServerboundTx`, then forward to core.
         ForwardToCore(ConnectionId, tungstenite::Message),

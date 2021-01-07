@@ -4,6 +4,7 @@
 
 mod common;
 mod core;
+mod data;
 mod db;
 mod errors;
 mod msg;
@@ -19,6 +20,7 @@ extern crate structopt;
 pub mod symbols {
     pub use crate::common::*;
     pub use crate::core::*;
+    pub use crate::data::*;
     pub use crate::db::*;
     pub use crate::errors::*;
     pub use crate::msg::*;

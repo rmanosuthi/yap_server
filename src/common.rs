@@ -12,49 +12,6 @@ mod shared {
     use crate::imports::*;
     use crate::symbols::*;
 
-    /// Tuple type for `UserRecord`. Only used in conversion from raw sql row.
-    pub type SqlUserRecord = (
-        u32,            // uid
-        String,         // email
-        String,         // pubkey
-        String,         // hashed_pass
-        Option<String>, // alias
-        String,         // friends
-        String,         // groups
-        Option<String>, // motd
-        String,         // status
-        String,         // visibility
-    );
-
-    /// Tuple type for `UserMessage`.
-    pub type SqlUserMessage = (
-        u64,            // umid
-        u32,            // sender_id
-        u32,            // receiver_id
-        String,         // msg_content
-        NaiveDateTime,  // time_posted stored as UTC
-        bool            // r
-    );
-
-    /// **Internal use:** User record. Intentionally made not serializable, so it doesn't accidentally get sent to the client.
-    #[derive(Debug, Clone)]
-    pub struct UserRecord {
-        pub uid: UserId,
-        pub email: String,
-        pub pubkey: Pubkey,
-        pub hashed_pass: HashedPassword,
-        pub alias: Option<String>,
-        pub friends: Vec<UserId>,
-        pub groups: Vec<GroupId>,
-        pub motd: Option<String>,
-        pub status: UserStatus,
-        pub visibility: UserVisibility,
-    }
-
-    pub trait FromSqlTup<T> where Self: Sized {
-        fn from_sql_tup(tup: T) -> Option<Self>;
-    }
-
     /// How much information should be omitted when sending `UserRecord` to the client.
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub enum UserMaskLevel {
@@ -66,69 +23,6 @@ mod shared {
         HidePassEmail,
         /// Allow everything except hashed password, email, friends, and groups.
         HidePassEmailMembership,
-    }
-
-    impl FromSqlTup<SqlUserRecord> for UserRecord {
-        /// Try to convert the raw sql row representation to a Rust struct.
-        fn from_sql_tup(tup: SqlUserRecord) -> Option<Self> {
-            let uid = UserId::from(tup.0);
-            let email = tup.1;
-            let pubkey = Pubkey::from(tup.2.clone());
-            let hashed_pass = HashedPassword::from(tup.3.clone());
-            let alias = tup.4;
-            let friends = serde_json::from_str(&tup.5).ok()?;
-            let groups = serde_json::from_str(&tup.6).ok()?;
-            let motd = tup.7;
-            let status = serde_json::from_str(&tup.8).ok()?;
-            let visibility = serde_json::from_str(&tup.9).ok()?;
-            Some(Self {
-                uid,
-                email,
-                pubkey,
-                hashed_pass,
-                alias,
-                friends,
-                groups,
-                motd,
-                status,
-                visibility,
-            })
-        }
-    }
-
-    impl UserRecord {
-        /// Convert to a public-facing form with optional hiding of information.
-        pub fn mask(self, mask: UserMaskLevel) -> PublicUserRecord {
-            PublicUserRecord {
-                uid: self.uid,
-                email: match mask {
-                    UserMaskLevel::HidePassEmail | UserMaskLevel::HidePassEmailMembership => None,
-                    _ => Some(self.email),
-                },
-                pubkey: self.pubkey,
-                hashed_pass: match mask {
-                    UserMaskLevel::SelfUse => Some(self.hashed_pass),
-                    _ => None,
-                },
-                alias: self.alias,
-                friends: match mask {
-                    UserMaskLevel::HidePassEmailMembership => None,
-                    _ => Some(self.friends),
-                },
-                groups: match mask {
-                    UserMaskLevel::HidePassEmailMembership => None,
-                    _ => Some(self.groups),
-                },
-                motd: self.motd,
-                online: match mask {
-                    UserMaskLevel::SelfUse => match self.status {UserStatus::Offline => false, _ => true},
-                    _ => match self.status {
-                        UserStatus::Online => true,
-                        _ => false
-                    }
-                }
-            }
-        }
     }
 
     /// Public-facing version of `UserRecord`. Can be safely sent to the client.
@@ -152,7 +46,7 @@ mod shared {
                 from: UserId::from(tup.1),
                 to: UserId::from(tup.2),
                 content: ClientMessage::from(tup.3),
-                time_posted: DateTime::from_utc(tup.4, Utc)
+                time_posted: DateTime::from_utc(tup.4, Utc),
             })
         }
     }
@@ -163,7 +57,7 @@ mod shared {
         from: UserId,
         to: UserId,
         time_posted: DateTime<Utc>,
-        content: ClientMessage
+        content: ClientMessage,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -213,20 +107,6 @@ mod shared {
     impl Display for UserId {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{}", self.0)
-        }
-    }
-
-    pub trait IntoSqlValue where Self: Sized + Into<mysql::Value> {
-        fn into_sql(self) -> mysql::Value {
-            self.into()
-        }
-    }
-
-    impl<T> IntoSqlValue for T where T: Sized + Into<mysql::Value> {}
-
-    impl Into<mysql::Value> for UserId {
-        fn into(self) -> mysql::Value {
-            self.0.into()
         }
     }
 
@@ -315,21 +195,11 @@ mod shared {
         }
     }
 
-    /*impl TryFrom<&str> for Pubkey {
-        type Error = usize; // length
-
-        fn try_from(value: &str) -> Result<Self, Self::Error> {
-            if value
-                .chars()
-                .all(|c| char::is_alphanumeric(c) && char::is_ascii(&c) && !char::is_whitespace(c))
-                && value.chars().count() == 256
-            {
-                Ok(Pubkey(value.to_owned()))
-            } else {
-                Err(value.len())
-            }
+    impl Into<mysql::Value> for UserId {
+        fn into(self) -> mysql::Value {
+            self.0.into()
         }
-    }*/
+    }
 
     /// Hashed password. Server performs no validation!
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -340,22 +210,6 @@ mod shared {
             HashedPassword(s)
         }
     }
-
-    /*impl TryFrom<&str> for HashedPassword {
-        type Error = usize; // length
-
-        fn try_from(value: &str) -> Result<Self, Self::Error> {
-            if value
-                .chars()
-                .all(|c| char::is_alphanumeric(c) && char::is_ascii(&c) && !char::is_whitespace(c))
-                && value.chars().count() == 16
-            {
-                Ok(HashedPassword(value.to_owned()))
-            } else {
-                Err(value.len())
-            }
-        }
-    }*/
 
     pub const LT_LEN: usize = 40;
 
@@ -410,25 +264,11 @@ mod shared {
         },
         Since(DateTime<Utc>),
     }
-    /** Message that is sent to the ws worker.*/
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub struct WsClientboundTx {
-        inner: WsClientboundPayload,
-    }
 
-    impl From<WsClientboundPayload> for WsClientboundTx {
-        fn from(pl: WsClientboundPayload) -> Self {
-            Self {inner: pl}
-        }
-    }
-
-    impl WsClientboundTx {
-        pub fn extract(self) -> Option<tungstenite::Message> {
-            serde_json::to_string(&self.inner).ok().map(tungstenite::Message::Text)
-        }
-    }
-
-    impl<T> From<T> for WsClientboundPayload where T: ClientboundPayload {
+    impl<T> From<T> for WsClientboundPayload
+    where
+        T: ClientboundPayload,
+    {
         fn from(i: T) -> Self {
             i.make_payload()
         }
@@ -440,7 +280,7 @@ mod shared {
     pub enum WsClientboundPayload {
         NewMessage(PublicUserMessage),
         NewMessages(Vec<PublicUserMessage>),
-        MessageSent(UserMessageId)
+        MessageSent(UserMessageId),
     }
     #[derive(Serialize, Deserialize, Debug)]
     pub struct RegisterRequest {
@@ -454,7 +294,10 @@ mod shared {
         pub email: String,
         pub password_hash: String,
     }
-    pub trait ClientboundPayload where Self: Sized {
+    pub trait ClientboundPayload
+    where
+        Self: Sized,
+    {
         fn make_payload(self) -> WsClientboundPayload;
     }
 
@@ -472,10 +315,7 @@ mod shared {
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum WsServerboundPayload {
-        NewUserMessage {
-            to: UserId,
-            content: ClientMessage
-        }
+        NewUserMessage { to: UserId, content: ClientMessage },
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -488,8 +328,8 @@ mod shared {
     }
 
     impl Display for ClientMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
         }
     }
 }

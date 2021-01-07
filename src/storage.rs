@@ -133,7 +133,7 @@ impl Storage {
         receiver: UserId,
         msg: ClientMessage,
     ) -> Option<PublicUserMessage> {
-        /*let mut tx = self.c.start_transaction(self.tx_opts).ok()?;
+        let mut tx = self.c.start_transaction(self.tx_opts).ok()?;
         let stmt = tx
             .prep(
                 "INSERT INTO u_message (sender_id, receiver_id, msg_content, time_posted, r)
@@ -153,12 +153,17 @@ impl Storage {
         .ok()?;
         match tx.last_insert_id().map(UserMessageId::from) {
             Some(res) => {
+                let stmt = tx.prep("SELECT * FROM u_message WHERE umid = :umid").ok()?;
+                let echo_msg = tx
+                    .exec_first(stmt, params! {"umid" => res.to_string()})
+                    .ok()?
+                    .map(PublicUserMessage::from_sql_tup)
+                    .flatten()?;
                 tx.commit().ok()?;
-                Some(res)
+                Some(echo_msg)
             }
             None => None,
-        }*/
-        todo!()
+        }
     }
     /**
     Post a new message destined for a group. **Does not flag message as read.**
