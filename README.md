@@ -41,3 +41,17 @@ Server for `yap` - a proof-of-concept chat program
 
 - Nightly Rust (`1.50` as of time of writing)
 - MySQL-compatible database
+
+# How to use
+
+- Generate a launch config file:
+
+```json
+{
+    "db_addr": "mysql://<user>:<password>@<ip>:<port>",
+    "api_addr": "<ip>:<port>",
+    "ws_addr": "<ip>:<port>"
+}
+```
+
+- Run `yap_server -c <cfg-path>`. Optionally, `RUST_LOG=debug yap_server -c <cfg-path>` to see more.
