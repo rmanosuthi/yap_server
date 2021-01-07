@@ -78,13 +78,14 @@ impl Ws {
                 Some(m_core) = chans.r_core.recv() => {
                     debug!("ws internal: new core msg {:?}", &m_core);
                     match m_core {
-                        CoreToWs::SendDirect {src, dest, msg: ws_c} => {
+                        CoreToWs::SendDirect {dest, tx} => {
                             // get dest's connected devices
                             match uid_cids_lookup.get(&dest) {
                                 Some(cids) => {
+                                    let m = WsToWorker::from(tx);
                                     for cid in cids {
                                         debug!("ws internal: sending payload to cid {}", &cid);
-                                        s_workers.get_mut(&cid).unwrap().send(WsToWorker::Payload(ws_c.clone())).await;
+                                        s_workers.get_mut(&cid).unwrap().send(m.clone()).await;
                                     }
                                 },
                                 None => {
@@ -98,21 +99,18 @@ impl Ws {
                 Some(m_worker) = r_from_worker.recv() => {
                     debug!("ws internal: new worker msg {:?}", &m_worker);
                     match m_worker {
-                        WorkerToWs::ForwardToCoreString(cid, stri) => {
+                        WorkerToWs::ForwardToCore(cid, tung_msg) => {
                             if let Some(uid) = cid_uid_lookup.get(&cid) {
-                                chans.s_core.send(WsToCore::new(uid.to_owned(), IncomingCoreMsg::String(stri))).await;
+                                match WsServerboundTx::new(uid.to_owned(), tung_msg).map(WsToCore::from) {
+                                    Some(core_msg) => {
+                                        chans.s_core.send(core_msg).await;
+                                    },
+                                    None => {}
+                                }
                             } else {
                                 warn!("ws -> core: no associated uid with cid {} for sending string", &cid);
                             }
-                        }
-                        WorkerToWs::ForwardToCoreVec(cid, u8s) => {
-                            if let Some(uid) = cid_uid_lookup.get(&cid) {
-                                chans.s_core.send(WsToCore::new(uid.to_owned(), IncomingCoreMsg::Binary(u8s))).await;
-                            } else {
-                                warn!("ws -> core: no associated uid with cid {} for sending vec", &cid);
-                            }
-                        }
-                        WorkerToWs::Disconnected(cid) => {
+                        },WorkerToWs::Disconnected(cid) => {
                             if let Some(uid) = cid_uid_lookup.get(&cid) {
                                 let uid = uid.clone();
                                 s_workers.retain(|k, v| *k != cid);
@@ -122,16 +120,7 @@ impl Ws {
                                 warn!("ws internal: received disconnect from unknown uid worker");
                             }
                         },
-                        WorkerToWs::ConfirmTransmittedUserMsg(cid, umid) => {
-                            if let Some(uid) = cid_uid_lookup.get(&cid) {
-                                chans.s_core.send(WsToCore::new(
-                                    uid.to_owned(),
-                                    IncomingCoreMsg::FlagRead(umid)
-                                )).await;
-                            } else {
-                                warn!("ws -> core: no associated uid with cid {} for confirm transmission", &cid);
-                            }
-                        }
+                        _ => unimplemented!()
                     }
                 }
                 Some(_) = chans.r_stop.recv() => {
@@ -294,35 +283,10 @@ impl Ws {
                                 c.close(None).await;
                                 s.send(WorkerToWs::Disconnected(conn_id.clone())).await;
                             },
-                            WsToWorker::Payload(ws_c) => {
+                            WsToWorker::Tx(tx) => {
                                 debug!("worker cid {}: received payload", &conn_id);
-                                // serialize
-                                match serde_json::to_string(&ws_c) {
-                                    Ok(serialized_payload) => {
-                                        // check if confirmation is necessary
-                                        match c.send(tungstenite::Message::text(serialized_payload)).await {
-                                            Ok(_) => {
-                                                match ws_c {
-                                                    WsClientbound::NewUserMessage {from: _, c: _, umid} => {
-                                                        debug!("worker cid {}: transmit ok", &conn_id);
-                                                        s.send(WorkerToWs::ConfirmTransmittedUserMsg(conn_id.to_owned(), umid)).await;
-                                                    },
-                                                    WsClientbound::NewGroupMessage {from: _, c: _, gmid} => {
-                                                        unimplemented!();
-                                                        debug!("worker cid {}: transmit ok", &conn_id);
-                                                        //s.send().await;
-                                                    },
-                                                    _ => {}
-                                                }
-                                            },
-                                            Err(e) => {
-                                                error!("worker cid {}: transmit failed {:?}", &conn_id, e);
-                                            }
-                                        }
-                                    },
-                                    Err(e) => {
-                                        error!("worker cid {}: payload serialization failed {:?}", &conn_id, e);
-                                    }
+                                if let Some(tung_msg) = tx.extract() {
+                                    c.send(tung_msg).await; // possible send failure
                                 }
                             }
                         }
@@ -330,28 +294,7 @@ impl Ws {
                     Some(raw_c_msg) = c.next() => {
                         debug!("ws worker: new from client");
                         if let Ok(c_msg) = raw_c_msg {
-                            match c_msg {
-                                tungstenite::Message::Text(stri) => {
-                                    // forward to core
-                                    debug!("{} forwarding msg {}", &conn_id, &stri);
-                                    s.send(WorkerToWs::ForwardToCoreString(conn_id.to_owned(), stri)).await;
-                                }
-                                tungstenite::Message::Binary(u8s) => {
-                                    warn!("{} unexpected ws binary message {:?}", &conn_id, &u8s);
-                                }
-                                tungstenite::Message::Ping(ping) => {
-                                    warn!("{} unexpected ws ping {:?}", &conn_id, &ping);
-                                }
-                                tungstenite::Message::Pong(pong) => {
-                                    warn!("{} unexpected ws pong {:?}", &conn_id, &pong);
-                                }
-                                tungstenite::Message::Close(close_frame) => {
-                                    info!("{} closing connection", &conn_id);
-                                    worker_active = false;
-                                    c.close(None).await;
-                                    s.send(WorkerToWs::Disconnected(conn_id.clone())).await;
-                                }
-                            }
+                            s.send(WorkerToWs::ForwardToCore(conn_id.to_owned(), c_msg)).await;
                         } else {
                             warn!("{} msg read failed", &conn_id);
                             worker_active = false;

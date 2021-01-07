@@ -58,7 +58,12 @@ impl Net {
                 .unwrap();
             rt.block_on(async move {
                 tokio::task::spawn(async move {
-                    Ws::internal(nc.clone(), ws_chans).await;
+                    match Ws::internal(nc.clone(), ws_chans).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("ws unexpectedly terminated: {:?}", e);
+                        }
+                    }
                 });
                 let nc = nc_closure.clone();
                 let r_stop_closure = r_stop.clone();
@@ -81,4 +86,14 @@ pub struct NetConfig {
     pub api_addr: String,
     pub ws_addr: String,
     pub enable_register: bool,
+}
+
+impl From<&Config> for NetConfig {
+    fn from(c: &Config) -> Self {
+        NetConfig {
+            api_addr: c.api_addr.clone(),
+            ws_addr: c.ws_addr.clone(),
+            enable_register: true
+        }
+    }
 }
