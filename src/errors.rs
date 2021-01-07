@@ -31,6 +31,7 @@ pub struct WebInvalidLoginToken;
 
 impl Reject for WebInvalidLoginToken {}
 
+#[derive(Debug)]
 pub enum NetInternalError {
     ListenerBind(Box<dyn Error>),
 }

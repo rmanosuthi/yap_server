@@ -58,7 +58,12 @@ impl Net {
                 .unwrap();
             rt.block_on(async move {
                 tokio::task::spawn(async move {
-                    Ws::internal(nc.clone(), ws_chans).await;
+                    match Ws::internal(nc.clone(), ws_chans).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            error!("ws unexpectedly terminated: {:?}", e);
+                        }
+                    }
                 });
                 let nc = nc_closure.clone();
                 let r_stop_closure = r_stop.clone();
