@@ -1,27 +1,49 @@
-use std::unimplemented;
+use std::pin::pin;
 
-use crate::imports::*;
-use crate::symbols::*;
+use crate::ServiceDone;
+use crate::data::WsClientboundTx;
+use crate::ipc::*;
+use crate::storage::*;
+use crate::web::*;
+use chrono::Utc;
+use common::*;
+use futures::stream::unfold;
+use log::debug;
+use log::info;
+use serde::{Deserialize, Serialize};
+use tokio::runtime::Handle;
+use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     pub db_addr: String,
     pub api_addr: String,
-    pub ws_addr: String
+    pub ws_addr: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CoreConfig {
-    pub db_addr: String
+    pub db_addr: String,
 }
 
 impl From<&Config> for CoreConfig {
     fn from(c: &Config) -> Self {
-        CoreConfig {db_addr: c.db_addr.clone()}
+        CoreConfig {
+            db_addr: c.db_addr.clone(),
+        }
     }
 }
 
 pub struct Core {}
+
+enum CoreEvent<T: Sized> {
+    MWsToCore(WsToCore),
+    Stop,
+    Request(T),
+}
 
 impl Core {
     /// Convenience function for asking core to process data.
@@ -41,23 +63,11 @@ impl Core {
             None
         }
     }
-    pub fn run(cc: CoreConfig, chans: CoreChannels) {
-        let mut r_stop = chans.r_stop.clone();
-        std::thread::spawn(move || {
-            let mut rt = tokio::runtime::Builder::new()
-                .threaded_scheduler()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.spawn(async move {
-                Core::internal(cc, chans).await;
-            });
-            rt.block_on(async move {
-                r_stop.recv().await.unwrap();
-                r_stop.recv().await.unwrap();
-                debug!("Core: stopped");
-            });
-        });
+    pub fn serve(hd: &Handle, js: &mut JoinSet<ServiceDone>, cc: CoreConfig, chans: CoreChannels) -> usize {
+        js.spawn_on(async move {
+            Core::internal(cc, chans).await
+        }, hd);
+        1
     }
     /**
     Main loop for Core. Does the following:
@@ -66,58 +76,61 @@ impl Core {
 
     Has a shutdown receiver.
     */
-    pub async fn internal(cc: CoreConfig, chans: CoreChannels) {
-        let mut run = true;
-        let mut r_f_ws = chans.r_ws;
-        let mut s_t_ws = chans.s_ws;
-        let mut r_stop = chans.r_stop;
-        let mut r_corereq = chans.r_corereq;
-        let mut store = Storage::new(
-            &cc.db_addr
-        )
-        .unwrap();
-        let mut first_stopped = false;
+    async fn internal(cc: CoreConfig, chans: CoreChannels) -> ServiceDone {
+        let mut store = Storage::new(&cc.db_addr)?;
+        let ev_recv_ws_to_core = unfold(chans.r_ws, |mut r_f_ws| async {
+            r_f_ws
+                .recv()
+                .await
+                .map(|m| (CoreEvent::MWsToCore(m), r_f_ws))
+        });
+        let ev_recv_corereq = unfold(chans.r_corereq, |mut r_corereq| async {
+            r_corereq
+                .recv()
+                .await
+                .map(|m| (CoreEvent::Request(m), r_corereq))
+        });
+        let ev_r_stop = unfold(chans.r_stop, |mut r_stop| async {
+            r_stop
+                .changed()
+                .await
+                .ok()
+                .map(|_| (CoreEvent::Stop, r_stop))
+        });
+        let mut evs = pin!(ev_recv_ws_to_core.merge(ev_recv_corereq).merge(ev_r_stop));
         info!("Core: started");
-        while run {
+        while let Some(ev) = evs.next().await {
             debug!("CORE LOOP");
-            tokio::select! {
-                Some(m_ws) = r_f_ws.recv() => {
-                    match m_ws {
-                        WsToCore::Tx(r_tx) => {
-                            let (uid, r_tx) = r_tx.extract();
-                            match r_tx {
-                                WsServerboundPayload::NewUserMessage {to, content: c} => {
-                                    if let Some(p_msg) = store.new_message_u(uid.clone(), to.clone(), c.clone()) {
-                                        let send = Some(p_msg) // necessary to use map
+            match ev {
+                CoreEvent::MWsToCore(WsToCore::Tx(r_tx)) => {
+                    let (uid, r_tx) = r_tx.extract();
+                    match r_tx {
+                        WsServerboundPayload::NewUserMessage { to, content: c } => {
+                            if let Some(p_msg) =
+                                store.new_message_u(uid.clone(), to.clone(), c.clone())
+                            {
+                                let send = Some(p_msg) // necessary to use map
                                             .map(WsClientboundPayload::from)
                                             .map(WsClientboundTx::from)
                                             .map(move |tx| CoreToWs::from_tx_u(to, tx))
                                             .unwrap();
-                                        s_t_ws.send(send).await;
-                                    }
-                                },
-                                _ => unimplemented!()
+                                chans.s_ws.send(send).await;
                             }
-                        },
-                        _ => unimplemented!()
+                        }
                     }
                 }
-                Some(_) = r_stop.recv() => {
-                    if !first_stopped {
-                        first_stopped = true;
-                        debug!("CORE set first stop");
-                    } else {
-                        debug!("Core: stopping");
-                        run = false;
-                        info!("Core: stopped");
-                    }
-                }
-                Some((creq, s)) = r_corereq.recv() => {
+                CoreEvent::Request((creq, s)) => {
                     debug!("core: received corereq");
                     s.send(Core::handle_corereqs(creq, &mut store).await);
                 }
+                CoreEvent::Stop => {
+                    debug!("Core: stopping");
+                    break;
+                }
             }
         }
+        info!("Core: stopped");
+        Ok(Utc::now())
     }
     /**
     Logic for handling core requests.

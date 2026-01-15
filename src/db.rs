@@ -1,6 +1,6 @@
-pub const Q_CREATE_YAP: &'static str = "CREATE DATABASE IF NOT EXISTS yap;";
+pub(crate) const Q_CREATE_YAP: &str = "CREATE DATABASE IF NOT EXISTS yap;";
 
-pub const Q_USE_YAP: &'static str = "USE yap;";
+pub(crate) const Q_USE_YAP: &str = "USE yap;";
 
 /* pubkey SHOULD BE rsa-2048 hex(512) but not enforced
 hashed_pass SHOULD BE sha256 hex(64) but not enforced
@@ -9,7 +9,7 @@ groups json
 status json
 visibility json
 */
-pub const Q_CREATE_TABLE_USERS: &'static str = "
+pub(crate) const Q_CREATE_TABLE_USERS: &str = "
 CREATE TABLE IF NOT EXISTS u (
     uid INT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
     email VARCHAR(50) UNIQUE NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS u (
 );";
 
 // msg_content json
-pub const Q_CREATE_TABLE_USER_MESSAGES: &'static str = "
+pub(crate) const Q_CREATE_TABLE_USER_MESSAGES: &str = "
 CREATE TABLE IF NOT EXISTS u_message (
     umid BIGINT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
     sender_id INT UNSIGNED NOT NULL,
@@ -37,13 +37,13 @@ CREATE TABLE IF NOT EXISTS u_message (
     FOREIGN KEY (receiver_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
 );";
 
-pub const Q_CREATE_TABLE_GROUPS: &'static str = "
+pub(crate) const Q_CREATE_TABLE_GROUPS: &str = "
 CREATE TABLE IF NOT EXISTS g (
     gid INT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
     motd VARCHAR(500)
 );";
 
-pub const Q_CREATE_TABLE_GROUP_USERS: &'static str = "
+pub(crate) const Q_CREATE_TABLE_GROUP_USERS: &str = "
 CREATE TABLE IF NOT EXISTS g_member (
     uid INT UNSIGNED NOT NULL,
     gid INT UNSIGNED NOT NULL,
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS g_member (
     FOREIGN KEY (gid) REFERENCES g(gid) ON DELETE CASCADE ON UPDATE CASCADE
 );";
 
-pub const Q_CREATE_TABLE_GROUP_MESSAGES: &'static str = "
+pub(crate) const Q_CREATE_TABLE_GROUP_MESSAGES: &str = "
 CREATE TABLE IF NOT EXISTS g_message (
     gmid BIGINT UNSIGNED AUTO_INCREMENT UNIQUE NOT NULL PRIMARY KEY,
     sender_id INT UNSIGNED NOT NULL,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS g_message (
     time_posted DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );";
 
-pub const Q_CREATE_TABLE_USER_READ_GROUP: &'static str = "
+pub(crate) const Q_CREATE_TABLE_USER_READ_GROUP: &str = "
 CREATE TABLE IF NOT EXISTS g_message_read (
     gmid BIGINT UNSIGNED UNIQUE NOT NULL,
     reader_id INT UNSIGNED NOT NULL,
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS g_message_read (
     FOREIGN KEY (reader_id) REFERENCES u(uid) ON DELETE CASCADE ON UPDATE CASCADE
 );";
 
-pub const Q_CREATE_FRIENDS: &'static str = "
+pub(crate) const Q_CREATE_FRIENDS: &str = "
 CREATE TABLE IF NOT EXISTS u_friend (
     l INT UNSIGNED NOT NULL,
     r INT UNSIGNED NOT NULL,

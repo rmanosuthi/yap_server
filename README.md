@@ -1,3 +1,9 @@
+This branch is no longer self contained. It must be built from `yap/`!
+
+See branch `old` for the self contained version.
+
+----
+
 # yap_server
 
 Server for `yap` - a proof-of-concept chat program

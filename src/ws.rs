@@ -1,7 +1,23 @@
-use hashbrown::hash_map::Entry;
+use chrono::Utc;
+use common::*;
+use futures::SinkExt;
+use futures::stream::unfold;
+use log::{debug, info, warn};
+use std::{collections::HashMap, fmt::Display, net::SocketAddr, pin::pin};
+use tokio::{
+    net::TcpStream, runtime::{Handle, Runtime}, sync::{mpsc, oneshot}, task::{JoinHandle, JoinSet}
+};
+use tokio_stream::StreamExt;
+use tokio_tungstenite::WebSocketStream;
+use tungstenite::{
+    handshake::server::{Callback, Request, Response},
+    http::{StatusCode, header},
+};
 
-use crate::imports::*;
-use crate::symbols::*;
+use crate::{
+    ServiceDone, data::WsServerboundTx, ipc::{CoreToWs, WebToWs, WorkerToWs, WsChannels, WsToCore, WsToWeb, WsToWorker}, net::NetConfig
+};
+use anyhow::{Error, Result};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ConnectionId(pub u64);
@@ -29,11 +45,23 @@ impl ConnectionIdAllocator {
     }
 }
 
+enum WsEvent {
+    FailedTcpSocket(Error),
+    TcpSocket(TcpStream, SocketAddr),
+    Web(WebToWs),
+    Core(CoreToWs),
+    Worker(WorkerToWs),
+    Stop,
+}
+
 impl Ws {
-    pub async fn internal(nc: NetConfig, chans: WsChannels) -> Result<(), NetInternalError> {
-        let mut tcp_listener = tokio::net::TcpListener::bind(nc.ws_addr.to_owned())
-            .await
-            .map_err(|e| NetInternalError::ListenerBind(Box::new(e)))?;
+    pub fn serve(hd: &Handle, js: &mut JoinSet<ServiceDone>, nc: NetConfig, chans: WsChannels) {
+        js.spawn_on(async move {
+            Ws::internal(nc, chans).await
+        }, hd);
+    }
+    async fn internal(nc: NetConfig, chans: WsChannels) -> ServiceDone {
+        let mut tcp_listener = tokio::net::TcpListener::bind(nc.ws_addr.to_owned()).await?;
         let mut run = true;
         let mut chans = chans;
         let mut cid_uid_lookup = HashMap::new();
@@ -43,42 +71,77 @@ impl Ws {
         let mut cia = ConnectionIdAllocator::new();
         let (mut s_to_worker, mut r_from_worker) = tokio::sync::mpsc::channel(100000);
         let mut first_stopped = false;
+        let ev_new_tcp_conn = unfold(tcp_listener, |mut tcp_listener| async {
+            Some((
+                match tcp_listener.accept().await {
+                    Ok((stream, addr)) => WsEvent::TcpSocket(stream, addr),
+                    Err(e) => WsEvent::FailedTcpSocket(e.into()),
+                },
+                tcp_listener,
+            ))
+        });
+        let ev_new_web_msg = unfold(chans.r_web, |mut r_web| async {
+            r_web.recv().await.map(|m_web| (WsEvent::Web(m_web), r_web))
+        });
+        let ev_new_core_msg = unfold(chans.r_core, |mut r_core| async {
+            r_core
+                .recv()
+                .await
+                .map(|m_core| (WsEvent::Core(m_core), r_core))
+        });
+        let ev_new_worker_msg = unfold(r_from_worker, |mut r_worker| async {
+            r_worker
+                .recv()
+                .await
+                .map(|m_worker| (WsEvent::Worker(m_worker), r_worker))
+        });
+        let ev_r_stop = unfold(chans.r_stop, |mut r_stop| async {
+            r_stop.changed().await.ok().map(|_| (WsEvent::Stop, r_stop))
+        });
+        let mut evs = pin!(
+            ev_new_tcp_conn
+                .merge(ev_new_web_msg)
+                .merge(ev_new_core_msg)
+                .merge(ev_new_worker_msg)
+                .merge(ev_r_stop)
+        );
         info!("Ws: started");
         info!("{:?}", &nc);
-        while run {
-            tokio::select! {
-                Some(ntc_maybe) = tcp_listener.next() => {
-                    if let Ok(ntc) = ntc_maybe {
-                        debug!("ws internal: new tcp connection {:?}", &ntc);
-                        Ws::handle_new_tcp(
-                            &mut cia,
-                            ntc,
-                            &chans.s_web,
-                            &mut s_workers,
-                            &mut cid_uid_lookup,
-                            &mut uid_cids_lookup,
-                            &mut lt_uid_lookup,
-                            s_to_worker.clone()
-                        ).await;
-                        debug!("ws internal: new tcp success");
-                    }
-                }
-                Some(m_web) = chans.r_web.recv() => {
-                    debug!("ws internal: new web msg {:?}", &m_web);
-                    Ws::handle_web(
+        while let Some(ev) = evs.next().await {
+            debug!("WS LOOP");
+            match ev {
+                WsEvent::TcpSocket(stream, addr) => {
+                    debug!("ws internal: new tcp connection {:?}", &stream);
+                    Ws::handle_new_tcp(
                         &mut cia,
-                        m_web,
+                        stream,
                         &chans.s_web,
                         &mut s_workers,
                         &mut cid_uid_lookup,
                         &mut uid_cids_lookup,
                         &mut lt_uid_lookup,
-                    ).await;
+                        s_to_worker.clone(),
+                    )
+                    .await;
+                    debug!("ws internal: new tcp success");
                 }
-                Some(m_core) = chans.r_core.recv() => {
-                    debug!("ws internal: new core msg {:?}", &m_core);
-                    match m_core {
-                        CoreToWs::SendDirect {dest, tx} => {
+                WsEvent::FailedTcpSocket(e) => {}
+                WsEvent::Web(msg) => {
+                    Ws::handle_web(
+                        &mut cia,
+                        msg,
+                        &chans.s_web,
+                        &mut s_workers,
+                        &mut cid_uid_lookup,
+                        &mut uid_cids_lookup,
+                        &mut lt_uid_lookup,
+                    )
+                    .await;
+                }
+                WsEvent::Core(msg) => {
+                    debug!("ws internal: new core msg {:?}", &msg);
+                    match msg {
+                        CoreToWs::SendDirect { dest, tx } => {
                             // get dest's connected devices
                             match uid_cids_lookup.get(&dest) {
                                 Some(cids) => {
@@ -87,30 +150,36 @@ impl Ws {
                                         debug!("ws internal: sending payload to cid {}", &cid);
                                         s_workers.get_mut(&cid).unwrap().send(m.clone()).await;
                                     }
-                                },
+                                }
                                 None => {
                                     warn!("ws internal: send to uid {} failed, no devices", &dest);
                                 }
                             }
-                        },
-                        _ => unimplemented!()
+                        }
+                        _ => unimplemented!(),
                     }
                 }
-                Some(m_worker) = r_from_worker.recv() => {
-                    debug!("ws internal: new worker msg {:?}", &m_worker);
-                    match m_worker {
+                WsEvent::Worker(msg) => {
+                    debug!("ws internal: new worker msg {:?}", &msg);
+                    match msg {
                         WorkerToWs::ForwardToCore(cid, tung_msg) => {
                             if let Some(uid) = cid_uid_lookup.get(&cid) {
-                                match WsServerboundTx::new(uid.to_owned(), tung_msg).map(WsToCore::from) {
+                                match WsServerboundTx::new(uid.to_owned(), tung_msg)
+                                    .map(WsToCore::from)
+                                {
                                     Some(core_msg) => {
                                         chans.s_core.send(core_msg).await;
-                                    },
+                                    }
                                     None => {}
                                 }
                             } else {
-                                warn!("ws -> core: no associated uid with cid {} for sending string", &cid);
+                                warn!(
+                                    "ws -> core: no associated uid with cid {} for sending string",
+                                    &cid
+                                );
                             }
-                        },WorkerToWs::Disconnected(cid) => {
+                        }
+                        WorkerToWs::Disconnected(cid) => {
                             if let Some(uid) = cid_uid_lookup.get(&cid) {
                                 let uid = uid.clone();
                                 s_workers.retain(|k, v| *k != cid);
@@ -119,33 +188,28 @@ impl Ws {
                             } else {
                                 warn!("ws internal: received disconnect from unknown uid worker");
                             }
-                        },
-                        _ => unimplemented!()
+                        }
+                        _ => unimplemented!(),
                     }
                 }
-                Some(_) = chans.r_stop.recv() => {
-                    if !first_stopped {
-                        first_stopped = true;
-                        debug!("Ws: set first stop");
-                    } else {
-                        run = false;
-                        info!("Ws: stopped");
-                    }
+                WsEvent::Stop => {
+                    info!("Ws: stopped");
+                    break;
                 }
-            };
+            }
         }
-        Ok(())
+        Ok(Utc::now())
     }
 
     async fn handle_web(
         cia: &mut ConnectionIdAllocator,
         m_web: WebToWs,
-        s_web: &Sender<WsToWeb>,
-        s_workers: &mut HashMap<ConnectionId, Sender<WsToWorker>>,
+        s_web: &mpsc::Sender<WsToWeb>,
+        s_workers: &mut HashMap<ConnectionId, mpsc::Sender<WsToWorker>>,
         cid_uid_lookup: &mut HashMap<ConnectionId, UserId>,
         uid_cids_lookup: &mut HashMap<UserId, Vec<ConnectionId>>,
         lt_uid_lookup: &mut HashMap<LoginToken, UserId>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<()> {
         match m_web {
             WebToWs::AddToken(cid, lt) => {
                 lt_uid_lookup.insert(lt, cid);
@@ -188,29 +252,27 @@ impl Ws {
     async fn handle_new_tcp(
         cia: &mut ConnectionIdAllocator,
         t: TcpStream,
-        s_web: &Sender<WsToWeb>,
-        s_workers: &mut HashMap<ConnectionId, Sender<WsToWorker>>,
+        s_web: &mpsc::Sender<WsToWeb>,
+        s_workers: &mut HashMap<ConnectionId, mpsc::Sender<WsToWorker>>,
         cid_uid_lookup: &mut HashMap<ConnectionId, UserId>,
         uid_cids_lookup: &mut HashMap<UserId, Vec<ConnectionId>>,
         lt_uid_lookup: &HashMap<LoginToken, UserId>,
-        s_worker: Sender<WorkerToWs>,
+        s_worker: mpsc::Sender<WorkerToWs>,
     ) -> Option<(UserId, ConnectionId)> {
-        let (send_c_uuid, recv_c_uuid) = tokio::sync::oneshot::channel();
-        let cb = |req: &tungstenite::handshake::server::Request,
-                  resp: Response<()>|
-         -> Result<Response<()>, Response<Option<String>>> {
+        let (send_c_uuid, recv_c_uuid) = oneshot::channel();
+        let cb = |req: &Request, resp: Response| {
             let hdr = req.headers();
-            if let Some(hv) = hdr.get(http::header::AUTHORIZATION) {
+            if let Some(hv) = hdr.get(header::AUTHORIZATION) {
                 if let Ok(tk) = hv.to_str() {
                     if let Some(c_uuid) = lt_uid_lookup.get(&LoginToken { tk: tk.to_owned() }) {
                         // valid user
-                        send_c_uuid.send(c_uuid.to_owned()).map_err(|e| {
-                            Response::builder()
+                        match send_c_uuid.send(c_uuid.to_owned()) {
+                            Ok(_) => Ok(resp),
+                            Err(e) => Err(Response::builder()
                                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                                 .body(Some("Channel send error".to_owned()))
-                                .unwrap()
-                        })?;
-                        Ok(resp)
+                                .unwrap()),
+                        }
                     } else {
                         // unauthorized
                         Err(Response::builder()
@@ -259,8 +321,8 @@ impl Ws {
     }
 
     async fn new_worker_conn(
-        s: Sender<WorkerToWs>,
-        r: Receiver<WsToWorker>,
+        s: mpsc::Sender<WorkerToWs>,
+        r: mpsc::Receiver<WsToWorker>,
         c: WebSocketStream<TcpStream>,
         conn_id: ConnectionId,
     ) {

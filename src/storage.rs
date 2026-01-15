@@ -1,6 +1,13 @@
-use crate::imports::*;
-use crate::symbols::*;
-use mysql::*;
+use std::time::SystemTime;
+
+use crate::db::*;
+use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use common::server_ext::*;
+use common::*;
+use log::debug;
+use mysql::from_row;
+use mysql::{params, prelude::*};
 
 pub struct Storage {
     c: mysql::PooledConn,
@@ -29,7 +36,7 @@ impl Storage {
         tx.query_drop(Q_CREATE_TABLE_GROUP_MESSAGES)?;
         tx.query_drop(Q_CREATE_TABLE_USER_READ_GROUP)?;
         tx.query_drop(Q_CREATE_FRIENDS)?;
-        tx.commit()
+        Ok(tx.commit()?)
     }
     /**
     Try to register a new user.
@@ -37,31 +44,22 @@ impl Storage {
     - user already exists
     - db error
     */
-    pub fn try_register(
-        &mut self,
-        req: RegisterRequest,
-    ) -> std::result::Result<UserId, RegisterError> {
-        let mut tx = self
-            .c
-            .start_transaction(self.tx_opts)
-            .map_err(RegisterError::DbError)?;
+    pub fn try_register(&mut self, req: RegisterRequest) -> Result<UserId> {
+        let mut tx = self.c.start_transaction(self.tx_opts)?;
         // try to get associated userid from email
-        let uids = tx
-            .query::<String, _>(format!("SELECT uid FROM u WHERE email = '{}';", req.email))
-            .map_err(RegisterError::DbError)?;
+        let uids =
+            tx.query::<String, _>(format!("SELECT uid FROM u WHERE email = '{}';", req.email))?;
         if uids.len() > 0 {
             // user already exists
-            Err(RegisterError::UserAlreadyExists)
+            Err(anyhow!("User already exists"))
         } else {
             // new user
-            let stmt = tx
-                .prep(
-                    "INSERT into u
+            let stmt = tx.prep(
+                "INSERT into u
             (email, pubkey, hashed_pass, friends, groups, status, visibility) VALUES
             (:email, :pubkey, :hashed_pass, :friends, :groups, :status, :visibility);
             ",
-                )
-                .map_err(RegisterError::DbError)?;
+            )?;
             tx.exec_drop(
                 stmt,
                 params! {
@@ -73,13 +71,12 @@ impl Storage {
                     "status" => serde_json::to_string(&UserStatus::default()).unwrap(),
                     "visibility" => serde_json::to_string(&UserVisibility::default()).unwrap()
                 },
-            )
-            .map_err(RegisterError::DbError)?;
+            )?;
             if let Some(cid) = tx.last_insert_id() {
-                tx.commit().map_err(RegisterError::DbError)?;
+                tx.commit()?;
                 Ok((cid as u32).into())
             } else {
-                Err(RegisterError::Unknown)
+                Err(anyhow!("last_insert_id returned None"))
             }
         }
     }
@@ -90,37 +87,29 @@ impl Storage {
     - invalid email
     - db error
     */
-    pub fn try_login(&mut self, req: LoginRequest) -> std::result::Result<UserId, LoginError> {
+    pub fn try_login(&mut self, req: LoginRequest) -> Result<UserId> {
         debug!("storage: login request {:?}", &req);
-        let mut tx = self
-            .c
-            .start_transaction(self.tx_opts)
-            .map_err(|e| LoginError::DbError(e))?;
-        let stmt = tx
-            .prep("SELECT uid, hashed_pass FROM u WHERE email = :email;")
-            .map_err(LoginError::DbError)?;
+        let mut tx = self.c.start_transaction(self.tx_opts)?;
+        let stmt = tx.prep("SELECT uid, hashed_pass FROM u WHERE email = :email;")?;
 
-        match tx
-            .exec_first::<(u32, String), _, _>(
-                stmt,
-                params! {
-                    "email" => &req.email
-                },
-            )
-            .map_err(LoginError::DbError)?
-        {
+        match tx.exec_first::<(u32, String), _, _>(
+            stmt,
+            params! {
+                "email" => &req.email
+            },
+        )? {
             Some((ref_uid, ref_pass)) => {
                 debug!("storage: login uid pass found");
                 if ref_pass == req.password_hash {
-                    tx.commit().map_err(LoginError::DbError)?;
+                    tx.commit()?;
                     Ok(UserId::from(ref_uid))
                 } else {
-                    Err(LoginError::InvalidPassword)
+                    Err(anyhow!("Invalid password"))
                 }
             }
             None => {
                 debug!("storage: login unknown email");
-                Err(LoginError::InvalidEmail)
+                Err(anyhow!("Invalid email"))
             }
         }
     }

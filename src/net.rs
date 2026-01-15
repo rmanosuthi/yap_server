@@ -1,10 +1,28 @@
-use tokio::join;
+use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 
-use crate::imports::*;
-use crate::symbols::*;
+use crate::ServiceDone;
+use crate::core::Config;
+use crate::web::Web;
+use crate::ws::Ws;
+use anyhow::Error;
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use log::error;
+use log::info;
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::runtime::Handle;
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
+
+use crate::ipc::{CoreChannels, WebChannels, WsChannels};
 
 pub struct Net {
-    s_pause: Sender<chrono::DateTime<chrono::Utc>>,
+    s_pause: mpsc::Sender<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Net {
@@ -40,60 +58,38 @@ impl Net {
     }
     pub fn resume(&self) {}
     pub fn pause(&self) {}
-    pub fn build(
+    pub fn serve(
+        hd: &Handle,
+        js: &mut JoinSet<ServiceDone>,
         nc: NetConfig,
         web_chans: WebChannels,
         ws_chans: WsChannels,
-        r_stop: tokio::sync::watch::Receiver<DateTime<Utc>>,
-    ) -> Result<Net, Box<dyn Error>> {
+        r_stop: watch::Receiver<DateTime<Utc>>,
+    ) -> usize {
         info!("building net...");
-        let mut r_stop = r_stop;
-        let (s_pause, r_pause) = tokio::sync::mpsc::channel(10);
-        let nc_closure = nc.clone();
-        std::thread::spawn(move || {
-            let mut rt = tokio::runtime::Builder::new()
-                .threaded_scheduler()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                tokio::task::spawn(async move {
-                    match Ws::internal(nc.clone(), ws_chans).await {
-                        Ok(_) => {},
-                        Err(e) => {
-                            error!("ws unexpectedly terminated: {:?}", e);
-                        }
-                    }
-                });
-                let nc = nc_closure.clone();
-                let r_stop_closure = r_stop.clone();
-                tokio::task::spawn(async move {
-                    Web::internal(nc, web_chans, r_stop_closure).await;
-                });
-                info!("Net: started");
-                r_stop.recv().await.unwrap();
-                r_stop.recv().await.unwrap();
-                info!("Net: stopped");
-            });
-        });
+        Ws::serve(hd, js, nc.clone(), ws_chans);
+        Web::serve(hd, js, nc, web_chans, r_stop);
         info!("net built!");
-        Ok(Net { s_pause })
+        return 2;
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NetConfig {
-    pub api_addr: String,
+    pub api_sock_addr: SocketAddr,
     pub ws_addr: String,
     pub enable_register: bool,
 }
 
-impl From<&Config> for NetConfig {
-    fn from(c: &Config) -> Self {
-        NetConfig {
-            api_addr: c.api_addr.clone(),
+impl TryFrom<&Config> for NetConfig {
+    type Error = Error;
+
+    fn try_from(c: &Config) -> std::result::Result<Self, Self::Error> {
+        let api_sock_addrs = c.api_addr.to_socket_addrs()?.collect::<Vec<_>>();
+        Ok(NetConfig {
+            api_sock_addr: api_sock_addrs[0],
             ws_addr: c.ws_addr.clone(),
-            enable_register: true
-        }
+            enable_register: true,
+        })
     }
 }
